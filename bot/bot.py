@@ -5,20 +5,21 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Optional
 
 from dotenv import load_dotenv
 from telegram import Update, Document
-from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Reuse r_runner from the app package
 import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.core.r_runner import run_rasch_model  # type: ignore
+from app.core.cleaning import clean_response_matrix  # type: ignore
 
 
 def read_token() -> str:
+    # Load .env if present
     load_dotenv()
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -28,7 +29,9 @@ def read_token() -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Assalomu alaykum! CSV fayl yuboring yoki /calcjson bilan JSON matritsa yuboring."
+        "Assalomu alaykum! CSV fayl yuboring yoki /calcjson bilan JSON matritsa yuboring.\n"
+        "- /template — namunaviy CSV faylni olish.\n"
+        "Tavsiya: birinchi ustun(lar) talabgor (Ism,Fam), keyin Q1..Q40 (0/1)."
     )
 
 
@@ -36,10 +39,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "\n".join([
             "Foydalanish:",
-            "- CSV fayl yuboring (0/1, header yo'q) — natija JSON qaytariladi.",
+            "- CSV fayl yuboring (0/1, header bo‘lishi mumkin) — natija JSON qaytariladi.",
             "- /calcjson {\"responses\": [[...],[...]]} — natija JSON.",
+            "- /template — namunaviy CSV faylni olish.",
+            "Tavsiya: birinchi ustun(lar) talabgor (Ism,Fam), keyin Q1..Q40 (0/1). Boshqa ko‘rinishlar tozalanadi, ammo xatolik ehtimoli bor.",
         ])
     )
+
+
+def _write_cleaned_to_csv(cleaned: List[List[Optional[int]]]) -> Path:
+    tmp = tempfile.NamedTemporaryFile(prefix="rasch_clean_", suffix=".csv", delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    with tmp_path.open("w", encoding="utf-8") as f:
+        for row in cleaned:
+            f.write(",".join("" if v is None else str(int(v)) for v in row) + "\n")
+    return tmp_path
 
 
 async def handle_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -55,7 +70,27 @@ async def handle_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await file.download_to_drive(custom_path=str(tf_path))
 
     try:
-        result: dict[str, Any] = run_rasch_model(tf_path)
+        # Read raw CSV (simple comma split)
+        rows: List[List[Any]] = []
+        with tf_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                rows.append([c for c in line.rstrip("\n").split(",")])
+
+        cleaned = clean_response_matrix(rows)
+        if not cleaned:
+            await update.message.reply_text("⚠️ Jadvalni tozalash imkonsiz: savollar aniqlanmadi.")
+            tf_path.unlink(missing_ok=True)
+            return
+
+        n_students = len(cleaned)
+        n_questions = len(cleaned[0]) if cleaned and cleaned[0] is not None else 0
+        await update.message.reply_text(f"✅ {n_students} ta talabgor, {n_questions} ta savol aniqlandi.")
+
+        tmp_path = _write_cleaned_to_csv(cleaned)
+        try:
+            result: dict[str, Any] = run_rasch_model(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
     except Exception as e:
         await update.message.reply_text(f"Hisoblash xatosi: {e}")
         tf_path.unlink(missing_ok=True)
@@ -64,7 +99,6 @@ async def handle_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     tf_path.unlink(missing_ok=True)
 
     out_str = json.dumps(result, ensure_ascii=False)
-    # Agar juda uzun bo'lsa, fayl sifatida yuboramiz
     if len(out_str) > 3500:
         bio = io.BytesIO(out_str.encode("utf-8"))
         bio.name = "rasch_result.json"
@@ -85,16 +119,21 @@ async def calcjson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         payload = json.loads(payload_str)
         matrix = payload.get("responses")
-        if not isinstance(matrix, list) or not matrix:
-            raise ValueError("responses noto'g'ri formatda")
+        cleaned = clean_response_matrix(matrix)
+        if not isinstance(cleaned, list) or not cleaned:
+            raise ValueError("Kiritma tozalanmadi yoki bo‘sh.")
     except Exception as e:
         await update.message.reply_text(f"JSON xato: {e}")
         return
 
+    n_students = len(cleaned)
+    n_questions = len(cleaned[0]) if cleaned and cleaned[0] is not None else 0
+    await update.message.reply_text(f"✅ {n_students} ta talabgor, {n_questions} ta savol aniqlandi.")
+
     with tempfile.TemporaryDirectory(prefix="rasch_") as td:
         p = Path(td) / "inp.csv"
         with p.open("w", encoding="utf-8") as f:
-            for row in matrix:
+            for row in cleaned:
                 f.write(",".join("" if v is None else str(int(v)) for v in row) + "\n")
         try:
             result = run_rasch_model(p)
@@ -111,6 +150,22 @@ async def calcjson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(out_str)
 
 
+async def template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Return sample CSV with headers and 40 items
+    headers = ["Ism", "Fam"] + [f"Q{i}" for i in range(1, 41)]
+    rows = [
+        ["Ali", "Valiyev"] + [0, 1] * 20,
+        ["Vali", "Aliyev"] + [1, 0] * 20,
+    ]
+    buf = io.StringIO()
+    buf.write(",".join(headers) + "\n")
+    for r in rows:
+        buf.write(",".join(str(x) for x in r) + "\n")
+    data = io.BytesIO(buf.getvalue().encode("utf-8"))
+    data.name = "sample_template.csv"
+    await update.message.reply_document(document=data)
+
+
 def main() -> None:
     token = read_token()
     app = Application.builder().token(token).build()
@@ -118,6 +173,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("calcjson", calcjson))
+    app.add_handler(CommandHandler("template", template))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_csv))
 
     app.run_polling(close_loop=False)

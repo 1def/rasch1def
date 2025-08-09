@@ -10,7 +10,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from .schemas import CalculateRequest
+from .core.cleaning import clean_response_matrix
 from .core.r_runner import run_rasch_model
+from app.services.scoring import enrich_person_scores
 
 
 app = FastAPI(
@@ -32,26 +34,26 @@ def _write_matrix_to_csv(temp_dir: Path, matrix: List[List[Optional[int]]]) -> P
 
 @app.post("/calculate")
 def calculate(request: CalculateRequest) -> JSONResponse:
-    # Basic validation already performed by Pydantic; enforce rectangular matrix at runtime too
-    if not request.responses or not request.responses[0]:
-        raise HTTPException(status_code=400, detail="Bo'sh javob matritsasi yuborildi.")
+    # 1) Tozalash va heuristika asosida header/ustunlarni filtrlash
+    cleaned = clean_response_matrix(request.responses)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Tozalashdan so'ng matritsa bo'sh qoldi.")
 
-    num_items = len(request.responses[0])
-    for idx, row in enumerate(request.responses, start=1):
+    # 2) Minimal tekshiruv (hamma qatorlar bir xil uzunlikda bo'lsin)
+    num_items = len(cleaned[0])
+    if num_items == 0:
+        raise HTTPException(status_code=400, detail="Hech qanday item ustuni aniqlanmadi.")
+    for idx, row in enumerate(cleaned, start=1):
         if len(row) != num_items:
             raise HTTPException(status_code=400, detail=f"{idx}-qator uzunligi mos emas: {len(row)} != {num_items}")
-        for jdx, val in enumerate(row, start=1):
-            if val is None:
-                continue
-            if val not in (0, 1):
-                raise HTTPException(status_code=400, detail=f"Yaroqsiz qiymat ({val}) {idx}-qator, {jdx}-ustun uchun. Faqat 0/1 yoki null ruxsat etiladi.")
 
     with tempfile.TemporaryDirectory(prefix="rasch_") as tmpdir:
         tmp_path = Path(tmpdir)
-        csv_path = _write_matrix_to_csv(tmp_path, request.responses)
+        csv_path = _write_matrix_to_csv(tmp_path, cleaned)
 
         try:
             result: dict[str, Any] = run_rasch_model(csv_path)
+            result = enrich_person_scores(result)
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
