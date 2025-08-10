@@ -16,7 +16,6 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.core.r_runner import run_rasch_model  # type: ignore
 from app.core.cleaning import clean_response_matrix  # type: ignore
-from app.services.pdf_generator import create_rasch_pdf_report  # type: ignore
 
 
 def read_token() -> str:
@@ -30,11 +29,8 @@ def read_token() -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Assalomu alaykum! Rasch model hisob-kitobi uchun:\n"
-        "📊 CSV fayl yuboring yoki /calcjson bilan JSON matritsa yuboring\n"
-        "📄 Natijalar PDF formatida qaytariladi\n"
-        "- /template — namunaviy CSV faylni olish\n"
-        "- /help — yordam\n"
+        "Assalomu alaykum! CSV fayl yuboring yoki /calcjson bilan JSON matritsa yuboring.\n"
+        "- /template — namunaviy CSV faylni olish.\n"
         "Tavsiya: birinchi ustun(lar) talabgor (Ism,Fam), keyin Q1..Q40 (0/1)."
     )
 
@@ -42,19 +38,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "\n".join([
-            "📋 Foydalanish:",
-            "📊 CSV fayl yuboring (0/1, header bo'lishi mumkin) — natija PDF qaytariladi",
-            "📄 /calcjson {\"responses\": [[...],[...]]} — natija PDF",
-            "📋 /template — namunaviy CSV faylni olish",
-            "",
-            "💡 Tavsiya: birinchi ustun(lar) talabgor (Ism,Fam), keyin Q1..Q40 (0/1)",
-            "🔧 Boshqa ko'rinishlar tozalanadi, ammo xatolik ehtimoli bor",
-            "",
-            "📈 PDF hisobotda quyidagilar bo'ladi:",
-            "• Umumiy ma'lumotlar (AIC, BIC, Log-Likelihood)",
-            "• Item qiyinchilik parametrlari",
-            "• Shaxs skorlari (EAP)",
-            "• Vizual grafiklar"
+            "Foydalanish:",
+            "- CSV fayl yuboring (0/1, header bo‘lishi mumkin) — natija JSON qaytariladi.",
+            "- /calcjson {\"responses\": [[...],[...]]} — natija JSON.",
+            "- /template — namunaviy CSV faylni olish.",
+            "Tavsiya: birinchi ustun(lar) talabgor (Ism,Fam), keyin Q1..Q40 (0/1). Boshqa ko‘rinishlar tozalanadi, ammo xatolik ehtimoli bor.",
         ])
     )
 
@@ -96,7 +84,7 @@ async def handle_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         n_students = len(cleaned)
         n_questions = len(cleaned[0]) if cleaned and cleaned[0] is not None else 0
-        await update.message.reply_text(f"✅ {n_students} ta talabgor, {n_questions} ta savol aniqlandi. Hisoblanmoqda...")
+        await update.message.reply_text(f"✅ {n_students} ta talabgor, {n_questions} ta savol aniqlandi.")
 
         tmp_path = _write_cleaned_to_csv(cleaned)
         try:
@@ -104,23 +92,19 @@ async def handle_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         finally:
             tmp_path.unlink(missing_ok=True)
     except Exception as e:
-        await update.message.reply_text(f"❌ Hisoblash xatosi: {e}")
+        await update.message.reply_text(f"Hisoblash xatosi: {e}")
         tf_path.unlink(missing_ok=True)
         return
 
     tf_path.unlink(missing_ok=True)
 
-    # PDF yaratish
-    try:
-        pdf_content = create_rasch_pdf_report(result)
-        bio = io.BytesIO(pdf_content)
-        bio.name = "rasch_report.pdf"
-        await update.message.reply_document(
-            document=bio,
-            caption=f"📊 Rasch Model Hisobot\n👥 {n_students} ta talabgor\n❓ {n_questions} ta savol"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ PDF yaratishda xato: {e}")
+    out_str = json.dumps(result, ensure_ascii=False)
+    if len(out_str) > 3500:
+        bio = io.BytesIO(out_str.encode("utf-8"))
+        bio.name = "rasch_result.json"
+        await update.message.reply_document(document=bio)
+    else:
+        await update.message.reply_text(out_str)
 
 
 async def calcjson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,14 +121,14 @@ async def calcjson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         matrix = payload.get("responses")
         cleaned = clean_response_matrix(matrix)
         if not isinstance(cleaned, list) or not cleaned:
-            raise ValueError("Kiritma tozalanmadi yoki bo'sh.")
+            raise ValueError("Kiritma tozalanmadi yoki bo‘sh.")
     except Exception as e:
-        await update.message.reply_text(f"❌ JSON xato: {e}")
+        await update.message.reply_text(f"JSON xato: {e}")
         return
 
     n_students = len(cleaned)
     n_questions = len(cleaned[0]) if cleaned and cleaned[0] is not None else 0
-    await update.message.reply_text(f"✅ {n_students} ta talabgor, {n_questions} ta savol aniqlandi. Hisoblanmoqda...")
+    await update.message.reply_text(f"✅ {n_students} ta talabgor, {n_questions} ta savol aniqlandi.")
 
     with tempfile.TemporaryDirectory(prefix="rasch_") as td:
         p = Path(td) / "inp.csv"
@@ -154,20 +138,16 @@ async def calcjson(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             result = run_rasch_model(p)
         except Exception as e:
-            await update.message.reply_text(f"❌ Hisoblash xatosi: {e}")
+            await update.message.reply_text(f"Hisoblash xatosi: {e}")
             return
 
-    # PDF yaratish
-    try:
-        pdf_content = create_rasch_pdf_report(result)
-        bio = io.BytesIO(pdf_content)
-        bio.name = "rasch_report.pdf"
-        await update.message.reply_document(
-            document=bio,
-            caption=f"📊 Rasch Model Hisobot\n👥 {n_students} ta talabgor\n❓ {n_questions} ta savol"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ PDF yaratishda xato: {e}")
+    out_str = json.dumps(result, ensure_ascii=False)
+    if len(out_str) > 3500:
+        bio = io.BytesIO(out_str.encode("utf-8"))
+        bio.name = "rasch_result.json"
+        await update.message.reply_document(document=bio)
+    else:
+        await update.message.reply_text(out_str)
 
 
 async def template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -176,7 +156,6 @@ async def template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     rows = [
         ["Ali", "Valiyev"] + [0, 1] * 20,
         ["Vali", "Aliyev"] + [1, 0] * 20,
-        ["Malika", "Karimova"] + [1, 1, 0, 0] * 10,
     ]
     buf = io.StringIO()
     buf.write(",".join(headers) + "\n")
@@ -184,10 +163,7 @@ async def template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         buf.write(",".join(str(x) for x in r) + "\n")
     data = io.BytesIO(buf.getvalue().encode("utf-8"))
     data.name = "sample_template.csv"
-    await update.message.reply_document(
-        document=data,
-        caption="📋 Namunaviy CSV fayl. Birinchi ustunlar talabgor ma'lumotlari, keyin savollar (0/1)"
-    )
+    await update.message.reply_document(document=data)
 
 
 def main() -> None:
@@ -200,8 +176,6 @@ def main() -> None:
     app.add_handler(CommandHandler("template", template))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_csv))
 
-    print("🤖 Telegram bot ishga tushdi!")
-    print(f"🔗 Token: {token[:20]}...")
     app.run_polling(close_loop=False)
 
 
